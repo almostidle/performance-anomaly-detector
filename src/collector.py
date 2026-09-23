@@ -1,8 +1,11 @@
+import sys
+sys.path.insert(0, '.')
 import random
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from src.database import MetricsDB
 import logging
+
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -61,7 +64,8 @@ class MetricsCollector:
         logger.info("✓ collector started")
     
     def stop(self):
-        self.scheduler.shutdown()
+        if self.scheduler.running:
+            self.scheduler.shutdown()
         self.db.close()
         logger.info("✓ collector stopped")
 
