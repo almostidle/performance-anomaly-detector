@@ -1,7 +1,10 @@
 """Baseline calculation and anomaly detection logic."""
 
+import logging
 import statistics
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 # how far a metric has to move from baseline before we call it an anomaly
 DEVIATION_THRESHOLD = 0.20  # 20%, per project spec
@@ -20,14 +23,14 @@ ANOMALY_TYPES = {
     "disk_io_percent": "disk_io_spike",
 }
 
-# "if X spikes, check Y" - shown to the on-call engineer in the alert
+# spec-mandated root-cause map (Sept 24 deliverable doc)
 ROOT_CAUSES = {
-    "queries_per_sec": "throughput dropped - check for locks/blocking queries",
-    "latency_p50": "latency spike - check slow queries",
-    "latency_p95": "latency spike - check slow queries",
-    "cpu_percent": "CPU spike - run query profiler",
-    "memory_percent": "memory spike - check for memory leak",
-    "disk_io_percent": "disk I/O spike - check for large scans, backups, or vacuum jobs",
+    "latency_p50": "check slow queries",
+    "latency_p95": "check slow queries",
+    "queries_per_sec": "check for locks",
+    "cpu_percent": "run query profiler",
+    "memory_percent": "check for memory leak",
+    "disk_io_percent": "check excessive logging",
 }
 
 
