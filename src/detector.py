@@ -98,6 +98,45 @@ class AnomalyDetector:
 
         return {bucket: self._summarize(values) for bucket, values in buckets.items()}
 
+    # ------------------------------------------------------------------
+    # Anomaly detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deviation_pct(current_value, baseline_mean):
+        return ((current_value - baseline_mean) / baseline_mean) * 100
+
+    def is_anomalous(self, metric_name, current_value, baseline):
+        """
+        is_anomalous(metric_name, current_value, baseline) -> bool
+
+        `baseline` is a single flat stats dict, e.g. one bucket out of
+        calculate_baseline()'s result: {"mean": .., "std": .., "min": .., "max": ..}.
+
+        Flags True if current_value deviates >20% from baseline mean, in
+        the "bad" direction for that metric (down for queries_per_sec,
+        up for everything else).
+        """
+        baseline_mean = baseline.get("mean") if baseline else None
+        if not baseline_mean:
+            # not enough history yet - don't alert on noise (week 1 case)
+            return False
+
+        deviation_pct = self._deviation_pct(current_value, baseline_mean)
+        logger.info(
+            "%s: current=%.2f baseline=%.2f deviation=%.1f%%",
+            metric_name, current_value, baseline_mean, deviation_pct,
+        )
+
+        threshold_pct = DEVIATION_THRESHOLD * 100
+        if metric_name in DROP_METRICS:
+            return deviation_pct <= -threshold_pct
+        return deviation_pct >= threshold_pct
+
+    def suggest_root_cause(self, metric_name):
+        """suggest_root_cause(metric_name) -> str"""
+        return ROOT_CAUSES.get(metric_name, "investigate recent deploys/config changes")
+
     @staticmethod
     def _severity(deviation_pct):
         """Bigger deviation = more severe. Thresholds are % away from baseline."""
@@ -108,16 +147,14 @@ class AnomalyDetector:
             return "warning"
         return "info"
 
-    def get_root_cause(self, metric_name):
-        """Plain-language 'what to check first' suggestion for a metric."""
-        return ROOT_CAUSES.get(metric_name, "investigate recent deploys/config changes")
-
     def detect(self, metric_name, current_value, timestamp=None, baseline=None):
         """
-        Compare current_value against the learned baseline for this metric.
+        Full anomaly report for one metric: picks the right business_hours/
+        nights bucket, runs is_anomalous(), and attaches severity + root
+        cause. Built on top of is_anomalous()/suggest_root_cause() - this
+        is what the dashboard/alerter should call.
 
-        Returns an anomaly dict if the deviation crosses DEVIATION_THRESHOLD
-        in the "bad" direction for that metric, otherwise None.
+        Returns an anomaly dict, or None if nothing is wrong.
         """
         timestamp = timestamp or datetime.now()
         dt = self._to_datetime(timestamp)
@@ -127,23 +164,12 @@ class AnomalyDetector:
 
         bucket = "business_hours" if self._is_business_hours(dt) else "nights"
         stats = baseline.get(bucket) or {}
-        baseline_mean = stats.get("mean")
 
-        # not enough history yet (e.g. week 1) - don't alert on noise
-        if not baseline_mean:
+        if not self.is_anomalous(metric_name, current_value, stats):
             return None
 
-        deviation = (current_value - baseline_mean) / baseline_mean
-        deviation_pct = round(deviation * 100, 1)
-
-        is_drop_metric = metric_name in DROP_METRICS
-        if is_drop_metric:
-            breached = deviation <= -DEVIATION_THRESHOLD
-        else:
-            breached = deviation >= DEVIATION_THRESHOLD
-
-        if not breached:
-            return None
+        baseline_mean = stats["mean"]
+        deviation_pct = round(self._deviation_pct(current_value, baseline_mean), 1)
 
         return {
             "metric": metric_name,
@@ -154,7 +180,7 @@ class AnomalyDetector:
             "deviation_pct": deviation_pct,
             "severity": self._severity(deviation_pct),
             "bucket": bucket,
-            "root_cause": self.get_root_cause(metric_name),
+            "root_cause": self.suggest_root_cause(metric_name),
         }
 
     def check_all(self, current_metrics, timestamp=None):
@@ -171,5 +197,3 @@ class AnomalyDetector:
             if anomaly:
                 anomalies.append(anomaly)
         return anomalies
-
-
