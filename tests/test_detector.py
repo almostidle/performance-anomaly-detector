@@ -67,7 +67,59 @@ class TestBaselineCalculation:
         assert baseline["nights"]["mean"] == 200
 
 
-class TestAnomalyDetection:
+class TestIsAnomalous:
+    """Direct tests of the spec function: is_anomalous(metric, value, baseline) -> bool"""
+
+    def test_19_percent_deviation_is_not_anomalous(self, detector):
+        baseline = {"mean": 100, "std": 5, "min": 90, "max": 110}
+        assert detector.is_anomalous("latency_p95", 119, baseline) is False
+
+    def test_20_percent_deviation_is_anomalous(self, detector):
+        baseline = {"mean": 100, "std": 5, "min": 90, "max": 110}
+        assert detector.is_anomalous("latency_p95", 120, baseline) is True
+
+    def test_returns_bool_type(self, detector):
+        baseline = {"mean": 100, "std": 5, "min": 90, "max": 110}
+        result = detector.is_anomalous("latency_p95", 250, baseline)
+        assert isinstance(result, bool)
+
+    def test_empty_baseline_is_not_anomalous(self, detector):
+        # no history yet - must not false-positive
+        assert detector.is_anomalous("cpu_percent", 95, {}) is False
+
+    def test_throughput_drop_is_anomalous(self, detector):
+        baseline = {"mean": 1000, "std": 50, "min": 900, "max": 1100}
+        assert detector.is_anomalous("queries_per_sec", 700, baseline) is True
+
+    def test_throughput_rise_is_not_anomalous(self, detector):
+        # a jump in queries/sec is not the "bad direction" for this metric
+        baseline = {"mean": 1000, "std": 50, "min": 900, "max": 1100}
+        assert detector.is_anomalous("queries_per_sec", 1500, baseline) is False
+
+
+class TestSuggestRootCause:
+    def test_cpu_spike_root_cause(self, detector):
+        assert detector.suggest_root_cause("cpu_percent") == "run query profiler"
+
+    def test_memory_spike_root_cause(self, detector):
+        assert detector.suggest_root_cause("memory_percent") == "check for memory leak"
+
+    def test_latency_spike_root_cause(self, detector):
+        assert detector.suggest_root_cause("latency_p95") == "check slow queries"
+
+    def test_throughput_drop_root_cause(self, detector):
+        assert detector.suggest_root_cause("queries_per_sec") == "check for locks"
+
+    def test_disk_io_spike_root_cause(self, detector):
+        assert detector.suggest_root_cause("disk_io_percent") == "check excessive logging"
+
+    def test_unknown_metric_has_fallback_root_cause(self, detector):
+        assert detector.suggest_root_cause("some_new_metric")
+
+
+class TestDetect:
+    """detect() = full report built on top of is_anomalous() + suggest_root_cause()."""
+
     def test_latency_spike_is_flagged(self, db, detector):
         # matches the scenario from the project brief:
         # "Latency 250ms vs baseline 100ms -> ANOMALY"
@@ -82,29 +134,13 @@ class TestAnomalyDetection:
         assert anomaly["current_value"] == 250
         assert anomaly["deviation_pct"] == 150.0
         assert anomaly["severity"] == "critical"
+        assert anomaly["root_cause"] == "check slow queries"
 
     def test_value_within_threshold_is_not_flagged(self, db, detector):
         seed_history(db, "latency_p95", 100, around=REFERENCE)
 
         # 10% above baseline - below the 20% threshold
         anomaly = detector.detect("latency_p95", 110, timestamp=REFERENCE)
-
-        assert anomaly is None
-
-    def test_throughput_drop_is_flagged(self, db, detector):
-        seed_history(db, "queries_per_sec", 1000, around=REFERENCE)
-
-        # queries/sec falling is bad; rising is fine and should not alert
-        anomaly = detector.detect("queries_per_sec", 200, timestamp=REFERENCE)
-
-        assert anomaly is not None
-        assert anomaly["type"] == "throughput_drop"
-
-    def test_throughput_spike_is_not_flagged(self, db, detector):
-        seed_history(db, "queries_per_sec", 1000, around=REFERENCE)
-
-        # a jump in queries/sec is not the "bad direction" for this metric
-        anomaly = detector.detect("queries_per_sec", 1500, timestamp=REFERENCE)
 
         assert anomaly is None
 
@@ -123,21 +159,3 @@ class TestAnomalyDetection:
 
         assert len(anomalies) == 1
         assert anomalies[0]["metric"] == "cpu_percent"
-
-
-class TestRootCauseSuggestions:
-    def test_cpu_spike_root_cause(self, detector):
-        assert "query profiler" in detector.get_root_cause("cpu_percent")
-
-    def test_memory_spike_root_cause(self, detector):
-        assert "memory leak" in detector.get_root_cause("memory_percent")
-
-    def test_latency_spike_root_cause(self, detector):
-        assert "slow queries" in detector.get_root_cause("latency_p95")
-
-    def test_throughput_drop_root_cause(self, detector):
-        assert "lock" in detector.get_root_cause("queries_per_sec")
-
-    def test_unknown_metric_has_fallback_root_cause(self, detector):
-        assert detector.get_root_cause("some_new_metric")
-
