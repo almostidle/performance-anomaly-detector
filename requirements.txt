@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+streamlit
+click
+psutil
+python-dotenv
+pytest
