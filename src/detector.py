@@ -95,3 +95,78 @@ class AnomalyDetector:
 
         return {bucket: self._summarize(values) for bucket, values in buckets.items()}
 
+    @staticmethod
+    def _severity(deviation_pct):
+        """Bigger deviation = more severe. Thresholds are % away from baseline."""
+        magnitude = abs(deviation_pct)
+        if magnitude >= 50:
+            return "critical"
+        if magnitude >= 30:
+            return "warning"
+        return "info"
+
+    def get_root_cause(self, metric_name):
+        """Plain-language 'what to check first' suggestion for a metric."""
+        return ROOT_CAUSES.get(metric_name, "investigate recent deploys/config changes")
+
+    def detect(self, metric_name, current_value, timestamp=None, baseline=None):
+        """
+        Compare current_value against the learned baseline for this metric.
+
+        Returns an anomaly dict if the deviation crosses DEVIATION_THRESHOLD
+        in the "bad" direction for that metric, otherwise None.
+        """
+        timestamp = timestamp or datetime.now()
+        dt = self._to_datetime(timestamp)
+
+        if baseline is None:
+            baseline = self.calculate_baseline(metric_name, reference_time=dt)
+
+        bucket = "business_hours" if self._is_business_hours(dt) else "nights"
+        stats = baseline.get(bucket) or {}
+        baseline_mean = stats.get("mean")
+
+        # not enough history yet (e.g. week 1) - don't alert on noise
+        if not baseline_mean:
+            return None
+
+        deviation = (current_value - baseline_mean) / baseline_mean
+        deviation_pct = round(deviation * 100, 1)
+
+        is_drop_metric = metric_name in DROP_METRICS
+        if is_drop_metric:
+            breached = deviation <= -DEVIATION_THRESHOLD
+        else:
+            breached = deviation >= DEVIATION_THRESHOLD
+
+        if not breached:
+            return None
+
+        return {
+            "metric": metric_name,
+            "type": ANOMALY_TYPES.get(metric_name, "anomaly"),
+            "timestamp": dt.isoformat(),
+            "current_value": round(current_value, 2),
+            "baseline_value": baseline_mean,
+            "deviation_pct": deviation_pct,
+            "severity": self._severity(deviation_pct),
+            "bucket": bucket,
+            "root_cause": self.get_root_cause(metric_name),
+        }
+
+    def check_all(self, current_metrics, timestamp=None):
+        """
+        Run detect() across a dict of {metric_name: current_value}
+        (e.g. straight from MetricsCollector.get_synthetic_data()).
+
+        Returns a list of anomaly dicts, one per metric that breached threshold.
+        """
+        timestamp = timestamp or datetime.now()
+        anomalies = []
+        for metric_name, value in current_metrics.items():
+            anomaly = self.detect(metric_name, value, timestamp=timestamp)
+            if anomaly:
+                anomalies.append(anomaly)
+        return anomalies
+
+
