@@ -25,7 +25,7 @@ class MetricsDB:
         """)
         
         # index for ankit's queries
-        # he'll ask: "give me all latency_p95 from sept 7-14"
+        # for ex. if he needs all latency_p95 from sept 7-14
         # this index makes that fast
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_metric_timestamp 
@@ -63,7 +63,7 @@ class MetricsDB:
     
     def get_metrics(self, metric_name, start, end):
         # this is what ankit calls for baseline calc
-        # "give me all values between date X and date Y"
+        # for ex. give me all values between date X and date Y
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT timestamp, value 
