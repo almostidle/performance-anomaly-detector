@@ -13,9 +13,9 @@ async def health():
 
 @app.get("/metrics")
 async def get_metrics(
-    name: str = Query(..., description="metric name"),
-    start: str = Query(..., description="start time ISO"),
-    end: str = Query(..., description="end time ISO")
+        name: str = Query(..., description="metric name"),
+        start: str = Query(..., description="start time ISO"),
+        end: str = Query(..., description="end time ISO")
 ):
     """
     get metrics for time range
@@ -41,6 +41,19 @@ async def get_latest(name: str = Query(...)):
     if ts is None:
         return {"error": f"no data for {name}"}, 404
     return {"metric": name, "ts": ts, "val": val}
+
+@app.get("/anomalies")
+async def get_anomalies(days: int = Query(7, description="lookback window in days")):
+    """
+    get recent anomalies
+    hardcoded for now -- wire up to real detection logic later
+    """
+    anomalies = [
+        {"date": "2026-09-20", "metric": "latency_p95", "value": 340, "baseline": 120, "severity": "high"},
+        {"date": "2026-09-21", "metric": "cpu", "value": 92, "baseline": 45, "severity": "medium"},
+        {"date": "2026-09-22", "metric": "memory", "value": 88, "baseline": 60, "severity": "medium"},
+    ]
+    return {"days": days, "count": len(anomalies), "anomalies": anomalies}
 
 if __name__ == "__main__":
     import uvicorn
