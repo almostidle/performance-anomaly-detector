@@ -1,4 +1,5 @@
 import sqlite3
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +17,8 @@ GET_METRICS_SQL = _load_sql("get_metrics.sql")
 GET_LATEST_SQL = _load_sql("get_latest.sql")
 GET_ALL_AT_TIME_SQL = _load_sql("get_all_at_time.sql")
 DELETE_OLD_SQL = _load_sql("delete_old.sql")
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsDB:
