@@ -33,6 +33,23 @@ ROOT_CAUSES = {
     "disk_io_percent": "check excessive logging",
 }
 
+# the 6 metrics the collector stores (same names as Dushyant's collector)
+METRIC_NAMES = [
+    "queries_per_sec",
+    "latency_p50",
+    "latency_p95",
+    "cpu_percent",
+    "memory_percent",
+    "disk_io_percent",
+]
+
+# readings closer together than this are treated as one anomaly event
+EVENT_GAP_MINUTES = 5
+
+# an event must have at least this many bad readings to be reported by the
+# history scan (filters one-off blips; 1 reading = 1 minute of data)
+MIN_EVENT_READINGS = 5
+
 
 class AnomalyDetector:
     """
@@ -106,6 +123,14 @@ class AnomalyDetector:
     def _deviation_pct(current_value, baseline_mean):
         return ((current_value - baseline_mean) / baseline_mean) * 100
 
+    @staticmethod
+    def _is_breach(metric_name, deviation_pct):
+        """Pure threshold check (no logging) - shared by live checks and history scans."""
+        threshold_pct = DEVIATION_THRESHOLD * 100
+        if metric_name in DROP_METRICS:
+            return deviation_pct <= -threshold_pct
+        return deviation_pct >= threshold_pct
+
     def is_anomalous(self, metric_name, current_value, baseline):
         """
         is_anomalous(metric_name, current_value, baseline) -> bool
@@ -127,11 +152,7 @@ class AnomalyDetector:
             "%s: current=%.2f baseline=%.2f deviation=%.1f%%",
             metric_name, current_value, baseline_mean, deviation_pct,
         )
-
-        threshold_pct = DEVIATION_THRESHOLD * 100
-        if metric_name in DROP_METRICS:
-            return deviation_pct <= -threshold_pct
-        return deviation_pct >= threshold_pct
+        return self._is_breach(metric_name, deviation_pct)
 
     def suggest_root_cause(self, metric_name):
         """suggest_root_cause(metric_name) -> str"""
@@ -197,3 +218,93 @@ class AnomalyDetector:
             if anomaly:
                 anomalies.append(anomaly)
         return anomalies
+
+    # ------------------------------------------------------------------
+    # Week 5: real baselines + history scan (used by the API)
+    # ------------------------------------------------------------------
+
+    def calculate_all_baselines(self, days=7, reference_time=None):
+        """Baseline for every metric: {metric_name: {business_hours: .., nights: ..}}"""
+        return {
+            name: self.calculate_baseline(name, days=days, reference_time=reference_time)
+            for name in METRIC_NAMES
+        }
+
+    def scan_history(self, days=7, reference_time=None, baselines=None, min_readings=MIN_EVENT_READINGS):
+        """
+        Look back over the last `days` of stored readings and return anomaly
+        EVENTS (consecutive bad readings grouped together), newest first.
+
+        Baselines are computed once per metric (not once per reading) so this
+        stays fast on ~60K rows. Note: the scanned window is also part of the
+        baseline window, so a long-lasting anomaly slightly raises its own
+        baseline - fine for V1, a good V2 improvement is a separate baseline window.
+        """
+        reference_time = reference_time or datetime.now()
+        start = (reference_time - timedelta(days=days)).isoformat()
+        end = reference_time.isoformat()
+        if baselines is None:
+            baselines = self.calculate_all_baselines(reference_time=reference_time)
+
+        events = []
+        for metric_name in METRIC_NAMES:
+            baseline = baselines.get(metric_name, {})
+            flagged = []  # (datetime, value, deviation_pct, bucket, baseline_mean)
+
+            for ts, value in self.db.get_metrics(metric_name, start, end):
+                dt = self._to_datetime(ts)
+                bucket = "business_hours" if self._is_business_hours(dt) else "nights"
+                mean = (baseline.get(bucket) or {}).get("mean")
+                if not mean:
+                    continue
+                deviation_pct = self._deviation_pct(value, mean)
+                if self._is_breach(metric_name, deviation_pct):
+                    flagged.append((dt, value, deviation_pct, bucket, mean))
+
+            events.extend(self._group_into_events(metric_name, flagged, min_readings))
+
+        events.sort(key=lambda e: e["start"], reverse=True)
+        logger.info("scan_history: %d anomaly events in last %d days", len(events), days)
+        return events
+
+    def _group_into_events(self, metric_name, flagged, min_readings=1):
+        """Merge flagged readings that are within EVENT_GAP_MINUTES of each other."""
+        if not flagged:
+            return []
+
+        groups, current = [], [flagged[0]]
+        for point in flagged[1:]:
+            gap = (point[0] - current[-1][0]).total_seconds() / 60
+            if gap <= EVENT_GAP_MINUTES:
+                current.append(point)
+            else:
+                groups.append(current)
+                current = [point]
+        groups.append(current)
+
+        is_drop = metric_name in DROP_METRICS
+        events = []
+        for group in groups:
+            if len(group) < min_readings:
+                continue  # one-off blip, not a real incident
+            # the "worst" reading: lowest for drop metrics, highest for the rest
+            peak = min(group, key=lambda p: p[1]) if is_drop else max(group, key=lambda p: p[1])
+            peak_dt, peak_value, peak_dev, bucket, mean = peak
+            events.append({
+                "metric": metric_name,
+                "type": ANOMALY_TYPES.get(metric_name, "anomaly"),
+                "start": group[0][0].isoformat(),
+                "end": group[-1][0].isoformat(),
+                "readings": len(group),
+                "peak_value": round(peak_value, 2),
+                "baseline_value": mean,
+                "deviation_pct": round(peak_dev, 1),
+                "severity": self._severity(peak_dev),
+                "bucket": bucket,
+                "root_cause": self.suggest_root_cause(metric_name),
+            })
+        return events
+
+    def get_anomalies(self, days=7, min_readings=MIN_EVENT_READINGS):
+        """Entry point for the API's GET /anomalies?days=N."""
+        return self.scan_history(days=days, min_readings=min_readings)
