@@ -45,3 +45,35 @@ async def get_latest(name: str = Query(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=API_HOST, port=API_PORT)
+
+    # ---- add to api/main.py (do NOT replace the whole file - Dushyant owns it) ----
+
+# 1) imports at the top (add HTTPException + detector imports):
+from fastapi import FastAPI, HTTPException, Query
+from src.detector import AnomalyDetector, METRIC_NAMES
+
+# 2) right after:  db = MetricsDB(DATABASE_PATH)
+detector = AnomalyDetector(db)
+
+# 3) replace the stub /anomalies endpoint with these two (above the `if __name__` block):
+@app.get("/anomalies")
+async def get_anomalies(days: int = Query(7, ge=1, le=30, description="how many days back to scan")):
+    """
+    anomaly events found in the last N days (consecutive bad readings grouped
+    into one event), newest first. each has severity + a root-cause hint.
+    example: /anomalies?days=7
+    """
+    try:
+        anomalies = detector.get_anomalies(days=days)
+        return {"days": days, "count": len(anomalies), "anomalies": anomalies}
+    except Exception as e:
+        logger.error(f"anomaly scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/baseline")
+async def get_baseline(name: str = Query(..., description="metric name"), days: int = Query(7, ge=1, le=30)):
+    """normal (baseline) values for a metric, split business_hours vs nights"""
+    if name not in METRIC_NAMES:
+        raise HTTPException(status_code=404, detail=f"unknown metric {name}, expected one of {METRIC_NAMES}")
+    return {"metric": name, "days": days, "baseline": detector.calculate_baseline(name, days=days)}
