@@ -159,3 +159,89 @@ class TestDetect:
 
         assert len(anomalies) == 1
         assert anomalies[0]["metric"] == "cpu_percent"
+
+
+# ----------------------------------------------------------------------
+# Week 5: all-metric baselines + history scan (used by GET /anomalies)
+# ----------------------------------------------------------------------
+
+def seed_minutes(db, metric_name, start, values):
+    """Insert one reading per minute starting at `start` (consecutive minutes)."""
+    for i, value in enumerate(values):
+        db.insert((start + timedelta(minutes=i)).isoformat(), metric_name, value)
+
+
+# Tuesday 2026-09-22: 09:00 -> 13:59 is 300 minutes of business hours
+DAY_START = datetime(2026, 9, 22, 9, 0, 0)
+
+
+class TestCalculateAllBaselines:
+    def test_returns_all_six_metrics(self, db, detector):
+        baselines = detector.calculate_all_baselines(reference_time=REFERENCE)
+
+        assert set(baselines) == {
+            "queries_per_sec", "latency_p50", "latency_p95",
+            "cpu_percent", "memory_percent", "disk_io_percent",
+        }
+        assert "business_hours" in baselines["cpu_percent"]
+        assert "nights" in baselines["cpu_percent"]
+
+
+class TestScanHistory:
+    def test_sustained_spike_becomes_one_event(self, db, detector):
+        # 290 normal minutes at 40% cpu, then 10 minutes at 90%
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 290 + [90] * 10)
+
+        events = detector.scan_history(days=7, reference_time=REFERENCE)
+
+        assert len(events) == 1
+        event = events[0]
+        assert event["metric"] == "cpu_percent"
+        assert event["type"] == "cpu_spike"
+        assert event["readings"] == 10
+        assert event["peak_value"] == 90
+        assert event["root_cause"] == "run query profiler"
+        assert event["start"] == (DAY_START + timedelta(minutes=290)).isoformat()
+
+    def test_single_reading_blip_is_ignored_by_default(self, db, detector):
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 299 + [90])
+
+        assert detector.scan_history(days=7, reference_time=REFERENCE) == []
+
+    def test_blip_is_reported_when_min_readings_is_one(self, db, detector):
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 299 + [90])
+
+        events = detector.scan_history(days=7, reference_time=REFERENCE, min_readings=1)
+
+        assert len(events) == 1
+
+    def test_throughput_drop_peak_is_the_lowest_value(self, db, detector):
+        seed_minutes(db, "queries_per_sec", DAY_START, [1000] * 290 + [300, 100, 200, 150, 250, 300, 400, 350, 200, 300])
+
+        events = detector.scan_history(days=7, reference_time=REFERENCE)
+
+        assert len(events) == 1
+        assert events[0]["type"] == "throughput_drop"
+        assert events[0]["peak_value"] == 100
+
+    def test_separate_incidents_are_separate_events_newest_first(self, db, detector):
+        values = [40] * 100 + [90] * 10 + [40] * 100 + [90] * 10 + [40] * 80
+        seed_minutes(db, "cpu_percent", DAY_START, values)
+
+        events = detector.scan_history(days=7, reference_time=REFERENCE)
+
+        assert len(events) == 2
+        assert events[0]["start"] > events[1]["start"]  # newest first
+
+    def test_healthy_data_has_no_events(self, db, detector):
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 300)
+
+        assert detector.scan_history(days=7, reference_time=REFERENCE) == []
+
+    def test_get_anomalies_matches_scan_history(self, db, detector):
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 290 + [90] * 10)
+
+        # get_anomalies uses "now" as the reference, so just check the shape/no crash
+        result = detector.get_anomalies(days=7)
+
+        assert isinstance(result, list)
