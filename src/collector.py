@@ -14,6 +14,7 @@ class MetricsCollector:
     def __init__(self, db_path):
         self.db = MetricsDB(db_path)
         self.scheduler = BackgroundScheduler()
+        self.collection_count = 0
     
     def get_synthetic_data(self):
         # fake realistic data
@@ -50,7 +51,14 @@ class MetricsCollector:
         
         except Exception as e:
             logger.error(f"✗ collection failed: {e}")
-    
+
+        # Every 100 collections (100 * 60s = ~1.67 hours), run cleanup.
+        if self.collection_count % 100 == 0:
+            deleted = self.db.delete_old(days=30)
+            logger.info(f"cleanup: {deleted} rows deleted")
+
+        self.collection_count += 1
+
     def start(self):
         # run collector every 60 seconds in background
         self.scheduler.add_job(
