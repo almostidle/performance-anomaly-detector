@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.database import MetricsDB
 
 @pytest.fixture
@@ -40,3 +40,21 @@ def test_get_latest(db):
     
     ts, val = db.get_latest("cpu_percent")
     assert val == 55.0  # latest
+
+def test_delete_old_metrics(db):
+    """should delete metrics older than retention cutoff and keep newer ones"""
+    old_ts = (datetime.now() - timedelta(days=40)).isoformat()
+    recent_ts = (datetime.now() - timedelta(days=10)).isoformat()
+    
+    db.insert(old_ts, "latency_p95", 100.0)
+    db.insert(recent_ts, "latency_p95", 120.0)
+    
+    deleted = db.delete_old(days=30)
+    assert deleted == 1
+    
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT timestamp, value FROM metrics")
+    remaining = cursor.fetchall()
+    assert len(remaining) == 1
+    assert remaining[0][1] == 120.0
+
