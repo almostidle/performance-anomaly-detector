@@ -1,7 +1,9 @@
-import psutil
 import time
 import requests
 from datetime import datetime, timedelta
+import pytest
+
+psutil = pytest.importorskip("psutil")
 
 def test_memory_leak(base_url="http://localhost:8000", duration_seconds=300):
     """Run for 5 min, check memory usage."""
