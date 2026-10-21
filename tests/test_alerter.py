@@ -20,19 +20,34 @@ def test_alert_template_is_readable():
 
 
 def test_cli_status_runs():
+    def fake_get(path, params=None):
+        if path == "/health":
+            return {"status": "ok"}
+        if path == "/metrics/latest":
+            return {"val": 1.23, "ts": "2026-10-21T00:00:00"}
+        return {}
+
+    cli.commands["status"].callback.__globals__["get"] = fake_get
     result = CliRunner().invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "System healthy" in result.output
+    assert "API status: ok" in result.output
 
 
 def test_cli_history_runs():
+    cli.commands["history"].callback.__globals__["get"] = lambda path, params=None: {"anomalies": []}
     result = CliRunner().invoke(cli, ["history"])
     assert result.exit_code == 0
-    assert "EMPTY" in result.output
+    assert "No anomalies in the last 7 days." in result.output
 
 
 def test_cli_baseline_runs():
-    result = CliRunner().invoke(cli, ["baseline", "latency"])
+    cli.commands["baseline"].callback.__globals__["get"] = lambda path, params=None: {
+        "baseline": {
+            "business_hours": {"mean": 120.0, "std": 5.0, "min": 110.0, "max": 130.0, "count": 10},
+            "nights": {"mean": 100.0, "std": 4.0, "min": 90.0, "max": 110.0, "count": 8},
+        }
+    }
+    result = CliRunner().invoke(cli, ["baseline", "latency_p50"])
     assert result.exit_code == 0
 
 
