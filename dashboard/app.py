@@ -1,3 +1,6 @@
+import os
+from datetime import datetime, timedelta
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -9,8 +12,18 @@ st.set_page_config(
     page_icon="📊",
 )
 
-API_BASE = "http://localhost:8000"
-METRICS = ["latency_p95", "throughput", "cpu", "memory", "disk", "queries/sec"]
+API_BASE = os.getenv("API_URL") or "http://{}:{}".format(
+    os.getenv("API_HOST", "localhost"), os.getenv("API_PORT", "8000")
+)
+# must match the metric names the collector/detector use
+METRICS = [
+    "queries_per_sec",
+    "latency_p50",
+    "latency_p95",
+    "cpu_percent",
+    "memory_percent",
+    "disk_io_percent",
+]
 
 # ---------------- styling ----------------
 st.markdown(
@@ -36,28 +49,15 @@ st.markdown(
             padding: 0.8rem 1rem 0.4rem 1rem;
         }
 
-        .placeholder-badge {
-            display: inline-block;
-            background-color: rgba(240, 196, 25, 0.12);
-            color: #f0c419;
-            border: 1px solid rgba(240, 196, 25, 0.35);
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            margin-bottom: 1rem;
-        }
-
         .anomaly-card {
             border-radius: 10px;
             padding: 0.9rem 1.1rem;
             margin-bottom: 0.6rem;
             border-left: 4px solid;
         }
-        .sev-high   { background: rgba(239, 68, 68, 0.08);  border-color: #ef4444; }
-        .sev-medium { background: rgba(249, 115, 22, 0.08); border-color: #f97316; }
-        .sev-low    { background: rgba(234, 179, 8, 0.08);  border-color: #eab308; }
+        .sev-critical { background: rgba(239, 68, 68, 0.08);  border-color: #ef4444; }
+        .sev-warning  { background: rgba(249, 115, 22, 0.08); border-color: #f97316; }
+        .sev-info     { background: rgba(234, 179, 8, 0.08);  border-color: #eab308; }
 
         section[data-testid="stSidebar"] { border-right: 1px solid rgba(255,255,255,0.06); }
     </style>
@@ -77,12 +77,16 @@ st.markdown(
 )
 
 # ---------------- sidebar ----------------
+now = datetime.now().replace(microsecond=0)
 with st.sidebar:
     st.header("⚙️ Controls")
     selected_metric = st.selectbox("Metric", METRICS)
-    start_dt = st.text_input("Start (ISO)", value="2026-09-23T00:00:00")
-    end_dt = st.text_input("End (ISO)", value="2026-09-24T23:59:59")
+    start_dt = st.text_input("Start (ISO)", value=(now - timedelta(days=1)).isoformat())
+    end_dt = st.text_input("End (ISO)", value=now.isoformat())
     fetch_clicked = st.button("🔍 Fetch Latest Data", use_container_width=True, type="primary")
+
+    st.divider()
+    anomaly_days = st.slider("Anomaly scan (days back)", 1, 30, 7)
 
     st.divider()
     st.caption("API status")
@@ -105,12 +109,15 @@ with tab_metrics:
             resp = requests.get(
                 f"{API_BASE}/metrics",
                 params={"name": selected_metric, "start": start_dt, "end": end_dt},
-                timeout=5,
+                timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
 
-            if "error" in data:
+            # the API can return a [dict, 500] list on failure, so check the shape first
+            if not isinstance(data, dict):
+                st.error(f"Unexpected API response: {data}")
+            elif "error" in data:
                 st.error(data["error"])
             elif data.get("count", 0) == 0:
                 st.warning("No data for this range", icon="📭")
@@ -130,6 +137,22 @@ with tab_metrics:
                 st.write("")
                 st.line_chart(df["val"], height=340)
 
+                # baseline for this metric (business hours vs nights)
+                try:
+                    b = requests.get(
+                        f"{API_BASE}/baseline",
+                        params={"name": selected_metric, "days": 7},
+                        timeout=10,
+                    ).json().get("baseline", {})
+                    bh = (b.get("business_hours") or {}).get("mean")
+                    nt = (b.get("nights") or {}).get("mean")
+                    st.caption(
+                        f"7-day baseline · business hours: **{bh if bh is not None else 'n/a'}** "
+                        f"· nights/weekends: **{nt if nt is not None else 'n/a'}**"
+                    )
+                except Exception:
+                    pass
+
                 with st.expander("View raw response"):
                     st.json(data)
 
@@ -139,32 +162,51 @@ with tab_metrics:
         st.info("Pick a metric and date range in the sidebar, then click **Fetch Latest Data**.", icon="👈")
 
 with tab_anomalies:
-    st.markdown('<span class="placeholder-badge">⚠️ PLACEHOLDER DATA — real detection ships Week 5</span>', unsafe_allow_html=True)
-
     try:
-        anomalies_resp = requests.get(f"{API_BASE}/anomalies", params={"days": 7}, timeout=5)
+        anomalies_resp = requests.get(
+            f"{API_BASE}/anomalies", params={"days": anomaly_days}, timeout=30
+        )
         anomalies_resp.raise_for_status()
         anomalies_data = anomalies_resp.json()
+        events = anomalies_data.get("anomalies", [])
 
-        if anomalies_data.get("count", 0) == 0:
-            st.warning("No data for this range", icon="📭")
+        if not events:
+            st.success(f"No anomalies detected in the last {anomaly_days} days.", icon="✅")
         else:
-            severity_icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}
+            counts = {"critical": 0, "warning": 0, "info": 0}
+            for a in events:
+                counts[a["severity"]] = counts.get(a["severity"], 0) + 1
 
-            for a in anomalies_data["anomalies"]:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🔴 Critical", counts["critical"])
+            c2.metric("🟠 Warning", counts["warning"])
+            c3.metric("🟡 Info", counts["info"])
+
+            shown = st.multiselect(
+                "Show severities",
+                ["critical", "warning", "info"],
+                default=["critical", "warning", "info"],
+            )
+            st.write("")
+
+            severity_icon = {"critical": "🔴", "warning": "🟠", "info": "🟡"}
+            for a in events:
+                if a["severity"] not in shown:
+                    continue
                 icon = severity_icon.get(a["severity"], "⚪")
-                delta = a["value"] - a["baseline"]
-                pct = (delta / a["baseline"] * 100) if a["baseline"] else 0
+                dev = a["deviation_pct"]
 
                 st.markdown(
                     f"""
                     <div class="anomaly-card sev-{a['severity']}">
-                        <b>{icon} {a['metric']}</b> &nbsp;·&nbsp; <span style="color:#9aa0a6;">{a['date']}</span>
+                        <b>{icon} {a['metric']}</b> &nbsp;·&nbsp; <span style="color:#9aa0a6;">{a['type'].replace('_', ' ')}</span>
                         &nbsp;·&nbsp; <b>{a['severity'].upper()}</b><br>
                         <span style="color:#9aa0a6;">
-                            value <b style="color:#e5e7eb;">{a['value']}</b> vs baseline
-                            <b style="color:#e5e7eb;">{a['baseline']}</b>
-                            ({'+' if delta >= 0 else ''}{delta:.0f}, {pct:+.1f}%)
+                            {a['start']} → {a['end']} ({a['readings']} readings)<br>
+                            peak <b style="color:#e5e7eb;">{a['peak_value']}</b> vs baseline
+                            <b style="color:#e5e7eb;">{a['baseline_value']}</b>
+                            ({dev:+.1f}%)<br>
+                            💡 {a['root_cause']}
                         </span>
                     </div>
                     """,
