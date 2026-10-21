@@ -6,9 +6,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.alerter import format_alert
 from click.testing import CliRunner
+import cli.commands as cli_commands
 from cli.commands import cli
 from fastapi.testclient import TestClient
 from api.main import app
+
+
+def _mock_cli_api(path, params=None):
+    if path == "/health":
+        return {"status": "ok"}
+    if path == "/metrics/latest":
+        return {"val": 123.45, "ts": "2026-10-21T00:00:00"}
+    if path == "/anomalies":
+        return {"anomalies": []}
+    if path == "/baseline":
+        return {
+            "baseline": {
+                "business_hours": {"mean": 100.0, "std": 10.0, "min": 80.0, "max": 120.0, "count": 7},
+                "nights": {"mean": 90.0, "std": 9.0, "min": 70.0, "max": 110.0, "count": 7},
+            }
+        }
+    raise AssertionError(f"Unexpected path: {path}")
 
 
 def test_alert_template_is_readable():
@@ -19,20 +37,23 @@ def test_alert_template_is_readable():
     assert "340" in msg
 
 
-def test_cli_status_runs():
+def test_cli_status_runs(monkeypatch):
+    monkeypatch.setattr(cli_commands, "get", _mock_cli_api)
     result = CliRunner().invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "System healthy" in result.output
+    assert "API status: ok" in result.output
 
 
-def test_cli_history_runs():
+def test_cli_history_runs(monkeypatch):
+    monkeypatch.setattr(cli_commands, "get", _mock_cli_api)
     result = CliRunner().invoke(cli, ["history"])
     assert result.exit_code == 0
-    assert "EMPTY" in result.output
+    assert "No anomalies in the last" in result.output
 
 
-def test_cli_baseline_runs():
-    result = CliRunner().invoke(cli, ["baseline", "latency"])
+def test_cli_baseline_runs(monkeypatch):
+    monkeypatch.setattr(cli_commands, "get", _mock_cli_api)
+    result = CliRunner().invoke(cli, ["baseline", "latency_p50"])
     assert result.exit_code == 0
 
 
