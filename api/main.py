@@ -35,14 +35,14 @@ async def get_metrics(
         }
     except Exception as e:
         logger.error(f"query failed: {e}")
-        return {"error": str(e)}, 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/metrics/latest")
 async def get_latest(name: str = Query(...)):
     """get most recent value for a metric"""
     ts, val = db.get_latest(name)
     if ts is None:
-        return {"error": f"no data for {name}"}, 404
+        raise HTTPException(status_code=404, detail=f"no data for {name}")
     return {"metric": name, "ts": ts, "val": val}
 
 @app.get("/anomalies")
