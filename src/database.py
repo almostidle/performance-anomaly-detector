@@ -28,20 +28,24 @@ class MetricsDBPool:
 
     def __init__(self, db_path, pool_size=5):
         self.db_path = str(db_path)
-        self.pool_size = pool_size
-        self.connections = Queue(maxsize=pool_size)
         self.lock = Lock()
 
         is_memory = self.db_path == ":memory:"
         if is_memory:
+            # In-memory SQLite databases are connection-isolated, so use pool_size=1 with a single shared connection.
+            self.pool_size = 1
+            self.connections = Queue(maxsize=1)
             self.primary_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            for _ in range(pool_size):
-                self.connections.put(self.primary_conn)
+            self.connections.put(self.primary_conn)
         else:
-            self.primary_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.pool_size = pool_size
+            self.connections = Queue(maxsize=pool_size)
+            self.primary_conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
+            self.primary_conn.execute("PRAGMA journal_mode=WAL")
             self.connections.put(self.primary_conn)
             for _ in range(pool_size - 1):
-                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
                 self.connections.put(conn)
 
     def get_connection(self):
@@ -201,15 +205,6 @@ class MetricsDB:
         finally:
             self.pool.release_connection(conn)
 
-    def analyze_query_plan(self, query):
-        """Show query execution plan."""
-        conn = self.pool.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(f"EXPLAIN QUERY PLAN {query}")
-            return cursor.fetchall()
-        finally:
-            self.pool.release_connection(conn)
 
     def close(self):
         self.pool.close_all()
