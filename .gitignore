@@ -6,3 +6,6 @@ __pycache__/
 *.db-journal
 venv/
 .DS_Store
+.venv/
+data/
+.idea/

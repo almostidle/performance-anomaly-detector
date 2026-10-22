@@ -4,10 +4,11 @@ import random
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from src.database import MetricsDB
+from src.config import COLLECTION_INTERVAL, RETENTION_DAYS, LOG_LEVEL
 import logging
 
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
 class MetricsCollector:
@@ -54,7 +55,7 @@ class MetricsCollector:
 
         # Every 100 collections (100 * 60s = ~1.67 hours), run cleanup.
         if self.collection_count % 100 == 0:
-            deleted = self.db.delete_old(days=30)
+            deleted = self.db.delete_old(days=RETENTION_DAYS)
             logger.info(f"cleanup: {deleted} rows deleted")
 
         self.collection_count += 1
@@ -64,7 +65,7 @@ class MetricsCollector:
         self.scheduler.add_job(
             self.collect,
             'interval',
-            seconds=60,
+            seconds=COLLECTION_INTERVAL,
             id='collector',
             replace_existing=True
         )

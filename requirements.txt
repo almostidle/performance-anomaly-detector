@@ -4,6 +4,7 @@ apscheduler==3.10.4
 pytest==7.4.2
 python-dotenv==1.0.0
 streamlit
+pandas
 click
 requests
 httpx==0.27.2
