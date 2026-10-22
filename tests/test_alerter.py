@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
 from api.main import app
-from cli.commands import cli
+from cli.commands import NotFoundError, cli
 from src.alerter import format_alert
 
 EVENT = {
@@ -86,6 +86,21 @@ def test_cli_anomalies_runs(monkeypatch):
     result = run_cli(monkeypatch, ["anomalies"])
     assert result.exit_code == 0
     assert "run query profiler" in result.output
+
+
+def test_cli_status_survives_missing_metric(monkeypatch):
+    """One metric returning 404 must not abort the whole status command."""
+    def get_with_one_404(path, params=None):
+        if path == "/metrics/latest" and params["name"] == "latency_p50":
+            raise NotFoundError("no data")
+        return fake_get(path, params)
+
+    monkeypatch.setattr("cli.commands.get", get_with_one_404)
+    result = CliRunner().invoke(cli, ["status"])
+    assert result.exit_code == 0
+    assert "latency_p50" in result.output
+    assert "n/a" in result.output
+    assert "cpu_percent" in result.output
 
 
 # ---------- API endpoints ----------

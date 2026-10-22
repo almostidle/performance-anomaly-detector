@@ -78,11 +78,17 @@ st.markdown(
 
 # ---------------- sidebar ----------------
 now = datetime.now().replace(microsecond=0)
+# set defaults ONCE; after that Streamlit keeps whatever you type
+if "start_dt" not in st.session_state:
+    st.session_state["start_dt"] = (now - timedelta(days=1)).isoformat()
+if "end_dt" not in st.session_state:
+    st.session_state["end_dt"] = now.isoformat()
+
 with st.sidebar:
     st.header("⚙️ Controls")
     selected_metric = st.selectbox("Metric", METRICS)
-    start_dt = st.text_input("Start (ISO)", value=(now - timedelta(days=1)).isoformat())
-    end_dt = st.text_input("End (ISO)", value=now.isoformat())
+    start_dt = st.text_input("Start (ISO)", key="start_dt")
+    end_dt = st.text_input("End (ISO)", key="end_dt")
     fetch_clicked = st.button("🔍 Fetch Latest Data", use_container_width=True, type="primary")
 
     st.divider()

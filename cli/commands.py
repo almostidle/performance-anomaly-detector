@@ -2,7 +2,8 @@
 
 Run from the repo root:
     python -m cli.commands status
-    python -m cli.commands history cpu_percent --hours 6
+    python -m cli.commands history --days 7
+    python -m cli.commands metrics cpu_percent --hours 6
     python -m cli.commands baseline cpu_percent
     python -m cli.commands anomalies --days 7
     python -m cli.commands anomalies --alert      # also fires the (mock) email alert
@@ -28,14 +29,27 @@ METRICS = [
 SEVERITY_COLORS = {"critical": "red", "warning": "yellow", "info": "cyan"}
 
 
+class NotFoundError(click.ClickException):
+    """The API answered 404 for this resource (e.g. a metric with no data)."""
+
+
 def get(path, params=None):
-    """GET from the API; exit with a clear message on failure."""
+    """GET from the API.
+
+    404 raises NotFoundError so a caller can handle it (status shows n/a).
+    Any other failure prints a clear message and exits.
+    """
     try:
         resp = requests.get(f"{API_URL}{path}", params=params, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
         click.secho(f"Cannot reach API at {API_URL}. Is it running?", fg="red", err=True)
+        sys.exit(1)
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise NotFoundError(f"Not found: {path} {params or ''}".strip())
+        click.secho(f"API error: {exc}", fg="red", err=True)
         sys.exit(1)
     except requests.exceptions.RequestException as exc:
         click.secho(f"API error: {exc}", fg="red", err=True)
@@ -55,7 +69,10 @@ def status():
     click.echo()
     click.echo(f"{'METRIC':<20}{'LATEST':>10}   TIMESTAMP")
     for name in METRICS:
-        data = get("/metrics/latest", {"name": name})
+        try:
+            data = get("/metrics/latest", {"name": name})
+        except NotFoundError:
+            data = None  # no data for this metric yet: show n/a, keep going
         if isinstance(data, dict) and data.get("val") is not None:
             click.echo(f"{name:<20}{data['val']:>10.2f}   {data.get('ts')}")
         else:
