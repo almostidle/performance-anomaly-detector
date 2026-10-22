@@ -7,13 +7,12 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # how far a metric has to move from baseline before we call it an anomaly
-DEVIATION_THRESHOLD = 0.20  # 20%, per project spec
+DEVIATION_THRESHOLD = 0.20
 
-# metrics where going DOWN is the bad direction (e.g. throughput collapsing).
-# every other metric is bad when it goes UP (latency/cpu/memory/disk spikes).
+
 DROP_METRICS = {"queries_per_sec"}
 
-# human-readable anomaly type per metric, used in the dashboard/alert copy
+
 ANOMALY_TYPES = {
     "queries_per_sec": "throughput_drop",
     "latency_p50": "latency_spike",
@@ -23,7 +22,7 @@ ANOMALY_TYPES = {
     "disk_io_percent": "disk_io_spike",
 }
 
-# spec-mandated root-cause map (Sept 24 deliverable doc)
+
 ROOT_CAUSES = {
     "latency_p50": "check slow queries",
     "latency_p95": "check slow queries",
@@ -33,7 +32,7 @@ ROOT_CAUSES = {
     "disk_io_percent": "check excessive logging",
 }
 
-# the 6 metrics the collector stores (same names as Dushyant's collector)
+
 METRIC_NAMES = [
     "queries_per_sec",
     "latency_p50",
@@ -43,6 +42,10 @@ METRIC_NAMES = [
     "disk_io_percent",
 ]
 
+# deviation reported when the baseline mean is exactly 0 (a % change from zero is
+# infinite, and inf is not valid JSON). big enough to always count as "critical".
+ZERO_BASELINE_DEVIATION_PCT = 1000.0
+
 # readings closer together than this are treated as one anomaly event
 EVENT_GAP_MINUTES = 5
 
@@ -51,23 +54,18 @@ EVENT_GAP_MINUTES = 5
 MIN_EVENT_READINGS = 5
 
 
-class AnomalyDetector:
-    """
-    Learns what "normal" looks like for each metric and flags deviations.
+def is_business_hours(dt):
+    return dt.weekday() < 5 and 9 <= dt.hour < 18
 
-    Uses the last N days of history from MetricsDB, split into two buckets
-    (business_hours vs nights) since traffic naturally looks different at
-    3pm on a Tuesday vs 3am on a Sunday.
-    """
+
+class AnomalyDetector:
 
     def __init__(self, db):
         self.db = db  # MetricsDB instance (Dushyant's src/database.py)
 
     @staticmethod
     def _is_business_hours(dt):
-        # Mon-Fri, 9am-6pm counts as business hours. Everything else is "nights"
-        # (nights + weekends), where traffic patterns are usually quieter.
-        return dt.weekday() < 5 and 9 <= dt.hour < 18
+        return is_business_hours(dt)
 
     @staticmethod
     def _to_datetime(ts):
@@ -75,7 +73,6 @@ class AnomalyDetector:
 
     @staticmethod
     def _summarize(values):
-        """Turn a list of raw values into mean/std/min/max/count."""
         if not values:
             return {"mean": None, "std": 0.0, "min": None, "max": None, "count": 0}
 
@@ -92,17 +89,8 @@ class AnomalyDetector:
         }
 
     def calculate_baseline(self, metric_name, days=7, reference_time=None):
-        """
-        Calculate the "normal" baseline for a metric from the last `days`
-        of history, split by business_hours vs nights.
-
-        Returns:
-            {
-                "business_hours": {"mean": .., "std": .., "min": .., "max": .., "count": ..},
-                "nights":         {"mean": .., "std": .., "min": .., "max": .., "count": ..},
-            }
-        """
-        reference_time = reference_time or datetime.now()
+        # accept a datetime or an ISO string (same as detect() does)
+        reference_time = self._to_datetime(reference_time) if reference_time else datetime.now()
         start = (reference_time - timedelta(days=days)).isoformat()
         end = reference_time.isoformat()
 
@@ -121,30 +109,22 @@ class AnomalyDetector:
 
     @staticmethod
     def _deviation_pct(current_value, baseline_mean):
+        if baseline_mean == 0:
+            if current_value == 0:
+                return 0.0
+            return ZERO_BASELINE_DEVIATION_PCT if current_value > 0 else -ZERO_BASELINE_DEVIATION_PCT
         return ((current_value - baseline_mean) / baseline_mean) * 100
 
     @staticmethod
     def _is_breach(metric_name, deviation_pct):
-        """Pure threshold check (no logging) - shared by live checks and history scans."""
         threshold_pct = DEVIATION_THRESHOLD * 100
         if metric_name in DROP_METRICS:
             return deviation_pct <= -threshold_pct
         return deviation_pct >= threshold_pct
 
     def is_anomalous(self, metric_name, current_value, baseline):
-        """
-        is_anomalous(metric_name, current_value, baseline) -> bool
-
-        `baseline` is a single flat stats dict, e.g. one bucket out of
-        calculate_baseline()'s result: {"mean": .., "std": .., "min": .., "max": ..}.
-
-        Flags True if current_value deviates >20% from baseline mean, in
-        the "bad" direction for that metric (down for queries_per_sec,
-        up for everything else).
-        """
         baseline_mean = baseline.get("mean") if baseline else None
-        if not baseline_mean:
-            # not enough history yet - don't alert on noise (week 1 case)
+        if baseline_mean is None:
             return False
 
         deviation_pct = self._deviation_pct(current_value, baseline_mean)
@@ -155,12 +135,10 @@ class AnomalyDetector:
         return self._is_breach(metric_name, deviation_pct)
 
     def suggest_root_cause(self, metric_name):
-        """suggest_root_cause(metric_name) -> str"""
         return ROOT_CAUSES.get(metric_name, "investigate recent deploys/config changes")
 
     @staticmethod
     def _severity(deviation_pct):
-        """Bigger deviation = more severe. Thresholds are % away from baseline."""
         magnitude = abs(deviation_pct)
         if magnitude >= 50:
             return "critical"
@@ -169,14 +147,6 @@ class AnomalyDetector:
         return "info"
 
     def detect(self, metric_name, current_value, timestamp=None, baseline=None):
-        """
-        Full anomaly report for one metric: picks the right business_hours/
-        nights bucket, runs is_anomalous(), and attaches severity + root
-        cause. Built on top of is_anomalous()/suggest_root_cause() - this
-        is what the dashboard/alerter should call.
-
-        Returns an anomaly dict, or None if nothing is wrong.
-        """
         timestamp = timestamp or datetime.now()
         dt = self._to_datetime(timestamp)
 
@@ -205,12 +175,7 @@ class AnomalyDetector:
         }
 
     def check_all(self, current_metrics, timestamp=None):
-        """
-        Run detect() across a dict of {metric_name: current_value}
-        (e.g. straight from MetricsCollector.get_synthetic_data()).
 
-        Returns a list of anomaly dicts, one per metric that breached threshold.
-        """
         timestamp = timestamp or datetime.now()
         anomalies = []
         for metric_name, value in current_metrics.items():
@@ -219,32 +184,22 @@ class AnomalyDetector:
                 anomalies.append(anomaly)
         return anomalies
 
-    # ------------------------------------------------------------------
-    # Week 5: real baselines + history scan (used by the API)
-    # ------------------------------------------------------------------
-
     def calculate_all_baselines(self, days=7, reference_time=None):
-        """Baseline for every metric: {metric_name: {business_hours: .., nights: ..}}"""
         return {
             name: self.calculate_baseline(name, days=days, reference_time=reference_time)
             for name in METRIC_NAMES
         }
 
-    def scan_history(self, days=7, reference_time=None, baselines=None, min_readings=MIN_EVENT_READINGS):
-        """
-        Look back over the last `days` of stored readings and return anomaly
-        EVENTS (consecutive bad readings grouped together), newest first.
-
-        Baselines are computed once per metric (not once per reading) so this
-        stays fast on ~60K rows. Note: the scanned window is also part of the
-        baseline window, so a long-lasting anomaly slightly raises its own
-        baseline - fine for V1, a good V2 improvement is a separate baseline window.
-        """
-        reference_time = reference_time or datetime.now()
+    def scan_history(self, days=7, reference_time=None, baselines=None,
+                     min_readings=MIN_EVENT_READINGS, baseline_days=None):
+        reference_time = self._to_datetime(reference_time) if reference_time else datetime.now()
         start = (reference_time - timedelta(days=days)).isoformat()
         end = reference_time.isoformat()
         if baselines is None:
-            baselines = self.calculate_all_baselines(reference_time=reference_time)
+            # learn "normal" from the same window we are scanning, unless the
+            # caller asks for a different baseline window
+            window = days if baseline_days is None else baseline_days
+            baselines = self.calculate_all_baselines(days=window, reference_time=reference_time)
 
         events = []
         for metric_name in METRIC_NAMES:
@@ -255,8 +210,8 @@ class AnomalyDetector:
                 dt = self._to_datetime(ts)
                 bucket = "business_hours" if self._is_business_hours(dt) else "nights"
                 mean = (baseline.get(bucket) or {}).get("mean")
-                if not mean:
-                    continue
+                if mean is None:
+                    continue  # no history for this bucket (a mean of 0 is valid data)
                 deviation_pct = self._deviation_pct(value, mean)
                 if self._is_breach(metric_name, deviation_pct):
                     flagged.append((dt, value, deviation_pct, bucket, mean))
@@ -268,7 +223,6 @@ class AnomalyDetector:
         return events
 
     def _group_into_events(self, metric_name, flagged, min_readings=1):
-        """Merge flagged readings that are within EVENT_GAP_MINUTES of each other."""
         if not flagged:
             return []
 

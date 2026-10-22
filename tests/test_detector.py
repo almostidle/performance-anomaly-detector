@@ -245,3 +245,125 @@ class TestScanHistory:
         result = detector.get_anomalies(days=7)
 
         assert isinstance(result, list)
+
+
+import json
+from unittest.mock import patch
+
+from src.detector import (
+    ZERO_BASELINE_DEVIATION_PCT,
+    is_business_hours,
+)
+
+ZERO_BASELINE = {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+
+
+class TestBug3ScanUsesDaysForBaselines:
+    def test_baseline_window_follows_days(self, detector):
+        with patch.object(detector, "calculate_all_baselines",
+                          wraps=detector.calculate_all_baselines) as spy:
+            detector.scan_history(days=30, reference_time=REFERENCE)
+
+        assert spy.call_args.kwargs["days"] == 30
+
+    def test_default_is_still_seven_days(self, detector):
+        with patch.object(detector, "calculate_all_baselines",
+                          wraps=detector.calculate_all_baselines) as spy:
+            detector.scan_history(reference_time=REFERENCE)
+
+        assert spy.call_args.kwargs["days"] == 7
+
+    def test_baseline_days_can_override_scan_window(self, detector):
+        with patch.object(detector, "calculate_all_baselines",
+                          wraps=detector.calculate_all_baselines) as spy:
+            detector.scan_history(days=30, baseline_days=7, reference_time=REFERENCE)
+
+        assert spy.call_args.kwargs["days"] == 7
+
+    def test_get_anomalies_passes_days_through(self, detector):
+        with patch.object(detector, "calculate_all_baselines",
+                          wraps=detector.calculate_all_baselines) as spy:
+            detector.get_anomalies(days=30)
+
+        assert spy.call_args.kwargs["days"] == 30
+
+
+class TestBug4ZeroBaseline:
+    def test_spike_from_zero_baseline_is_anomalous(self, detector):
+        # used to return False because 0.0 is falsy and was treated like "no history"
+        assert detector.is_anomalous("disk_io_percent", 50, ZERO_BASELINE) is True
+
+    def test_zero_current_on_zero_baseline_is_not_anomalous(self, detector):
+        assert detector.is_anomalous("disk_io_percent", 0, ZERO_BASELINE) is False
+
+    def test_throughput_cannot_drop_below_zero_baseline(self, detector):
+        assert detector.is_anomalous("queries_per_sec", 100, ZERO_BASELINE) is False
+
+    def test_missing_mean_still_means_no_history(self, detector):
+        assert detector.is_anomalous("cpu_percent", 95, {"mean": None}) is False
+
+    def test_deviation_pct_does_not_divide_by_zero(self, detector):
+        assert detector._deviation_pct(50, 0) == ZERO_BASELINE_DEVIATION_PCT
+        assert detector._deviation_pct(0, 0) == 0.0
+
+    def test_detect_returns_json_safe_report_for_zero_baseline(self, db, detector):
+        seed_history(db, "disk_io_percent", 0, around=REFERENCE)
+
+        anomaly = detector.detect("disk_io_percent", 50, timestamp=REFERENCE)
+
+        assert anomaly is not None
+        assert anomaly["deviation_pct"] == ZERO_BASELINE_DEVIATION_PCT
+        assert anomaly["severity"] == "critical"
+        json.dumps(anomaly)  # must not contain inf/nan - the API returns this as JSON
+
+    def test_scan_history_does_not_skip_zero_baseline(self, db, detector):
+        seed_minutes(db, "disk_io_percent", DAY_START, [5] * 10)
+        zero = {"business_hours": ZERO_BASELINE, "nights": ZERO_BASELINE}
+
+        events = detector.scan_history(
+            days=7, reference_time=REFERENCE, baselines={"disk_io_percent": zero}
+        )
+
+        assert len(events) == 1
+        assert events[0]["metric"] == "disk_io_percent"
+        assert events[0]["baseline_value"] == 0.0
+
+
+class TestBug5StringReferenceTime:
+    STRING_REF = REFERENCE.isoformat()  # "2026-09-22T14:00:00"
+
+    def test_calculate_baseline_accepts_iso_string(self, db, detector):
+        seed_history(db, "latency_p95", 100, around=REFERENCE)
+
+        from_string = detector.calculate_baseline("latency_p95", reference_time=self.STRING_REF)
+        from_datetime = detector.calculate_baseline("latency_p95", reference_time=REFERENCE)
+
+        assert from_string == from_datetime
+        assert from_string["business_hours"]["mean"] == 100
+
+    def test_calculate_all_baselines_accepts_iso_string(self, detector):
+        baselines = detector.calculate_all_baselines(reference_time=self.STRING_REF)
+
+        assert len(baselines) == 6
+
+    def test_scan_history_accepts_iso_string(self, db, detector):
+        seed_minutes(db, "cpu_percent", DAY_START, [40] * 290 + [90] * 10)
+
+        from_string = detector.scan_history(days=7, reference_time=self.STRING_REF)
+        from_datetime = detector.scan_history(days=7, reference_time=REFERENCE)
+
+        assert from_string == from_datetime
+        assert len(from_string) == 1
+
+
+class TestSharedBusinessHoursRule:
+    def test_business_hours_boundaries(self):
+        assert is_business_hours(datetime(2026, 9, 22, 9, 0)) is True      # Tue 09:00 starts
+        assert is_business_hours(datetime(2026, 9, 22, 8, 59)) is False
+        assert is_business_hours(datetime(2026, 9, 22, 17, 59)) is True
+        assert is_business_hours(datetime(2026, 9, 22, 18, 0)) is False    # 18:00 is night
+        assert is_business_hours(datetime(2026, 9, 20, 12, 0)) is False    # Sunday noon
+
+    def test_detector_uses_the_same_rule(self, detector):
+        assert detector._is_business_hours(REFERENCE) is is_business_hours(REFERENCE)
+        assert detector._is_business_hours(NIGHT_REFERENCE) is is_business_hours(NIGHT_REFERENCE)
