@@ -1,3 +1,5 @@
+# /health, /metrics, /metrics/latest (Dushyant)
+
 from fastapi import FastAPI, HTTPException, Query
 from src.config import API_HOST, API_PORT, DATABASE_PATH
 from src.database import MetricsDB

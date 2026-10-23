@@ -1,3 +1,4 @@
+# generates six values per cycle,inserts,runs cleanup
 import sys
 sys.path.insert(0, '.')
 import random

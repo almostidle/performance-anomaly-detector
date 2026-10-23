@@ -1,3 +1,5 @@
+# Measurement tools. Not part of the demo
+
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

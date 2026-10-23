@@ -1,3 +1,5 @@
+# Measurement tools. Not part of the demo
+
 import time
 import requests
 from datetime import datetime, timedelta

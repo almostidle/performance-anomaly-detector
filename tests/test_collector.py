@@ -1,3 +1,4 @@
+# 2 tests for the collector
 import pytest
 from src.collector import MetricsCollector
 

@@ -1,3 +1,4 @@
+# read .env settings
 import os
 from dotenv import load_dotenv
 
