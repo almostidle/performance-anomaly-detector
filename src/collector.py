@@ -47,8 +47,8 @@ class MetricsCollector:
                         logger.debug(f"✓ {name}: {val:.2f}")
                     else:
                         logger.error(f"✗ {name} failed")
-                except ValueError as e:
-                    logger.error(f"✗ {name} validation: {e}")
+                except Exception as e:
+                    logger.error(f"✗ {name} failed: {e}")
         
         except Exception as e:
             logger.error(f"✗ collection failed: {e}")

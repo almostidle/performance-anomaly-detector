@@ -103,9 +103,8 @@ class AnomalyDetector:
 
         return {bucket: self._summarize(values) for bucket, values in buckets.items()}
 
-    # ------------------------------------------------------------------
+
     # Anomaly detection
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _deviation_pct(current_value, baseline_mean):
